@@ -24,6 +24,14 @@ const REGIONS = [
   { code: "TW",    name: "Taiwan" },
 ];
 
+/* Region code → actual API param (some regions differ) */
+const REGION_API_CODE: Record<string, string> = {
+  ME: "MEA",
+};
+function apiCode(region: string): string {
+  return REGION_API_CODE[region] ?? region;
+}
+
 /* Per-region quick-filter chips */
 const REGION_FILTERS: Record<string, string[]> = {
   SG:    ["Tab", "1400x700"],
@@ -48,17 +56,17 @@ const GROUP_ORDER = [
   "BOOYAHPASS", "PATCH", "SOCIALS_HTML", "OTHERS",
 ];
 
+const PAGE_SIZE = 30;
+
 type Tab = "banners" | "store";
 
-/* New API shape (groups = URL string arrays) */
+/* ─── API shapes ─── */
 interface ApiResponseNew {
   success: boolean;
   server: string;
   total_assets?: number;
   groups: Record<string, string[]>;
 }
-
-/* Old API shape (categories = item-object arrays) — kept for fallback */
 interface LegacyItem {
   slno: number;
   filename: string;
@@ -76,10 +84,9 @@ interface ApiResponseOld {
     others?:      { items: LegacyItem[] };
   };
 }
-
 type ApiResponse = ApiResponseNew | ApiResponseOld;
 
-/* Normalised item used everywhere in the UI */
+/* Normalised item */
 interface BannerItem {
   id: string;
   request_name: string;
@@ -90,13 +97,9 @@ interface BannerItem {
 /* ─── URL helpers ─── */
 function cleanUrl(raw: string): string {
   if (!raw) return raw;
-  // Strip garbage / non-ASCII that sometimes trails the real URL
   let url = raw.replace(/[^\x20-\x7E]+.*$/, "").trim();
-  // Remove duplicated region path: /common/{letters}/common/ → /common/
   url = url.replace(/\/common\/[a-z]{1,6}\/common\//gi, "/common/");
-  // Remove short region prefix directly before OB version: /common/0OB53/ → /common/OB53/
   url = url.replace(/\/common\/[-0-9a-zA-Z]{1,4}(OB\d+)\//gi, "/common/$1/");
-  // Trim junk after a known extension
   const extMatch = url.match(
     /^(https?:\/\/[^\s]+?\.(jpg|jpeg|png|gif|webp|svg|mp4|mp3|ogg|html|json|ktx))/i
   );
@@ -105,12 +108,9 @@ function cleanUrl(raw: string): string {
 
 function nameFromUrl(rawUrl: string): string {
   const url = cleanUrl(rawUrl);
-  // Grab last path segment
   const seg = url.split("/").pop() ?? url;
-  // Strip known extension
   let name = seg.replace(/\.(jpg|jpeg|png|gif|webp|svg|mp4|mp3|ogg|html|json|ktx)$/i, "");
-  // Strip trailing language/region suffixes like _IND_en, _en, _hi, -en
-  name = name.replace(/[_-](IND|SG|BD|CIS|EU|NA|PK|ID|TH|ME|BR|LATAM|VN|TW)[_-]?(en|hi|ar|th|vn|es|pt|zh|ru|id|tr)?$/i, "");
+  name = name.replace(/[_-](IND|SG|BD|CIS|EU|NA|PK|ID|TH|ME|MEA|BR|LATAM|VN|TW)[_-]?(en|hi|ar|th|vn|es|pt|zh|ru|id|tr)?$/i, "");
   name = name.replace(/[_-](en|hi|ar|th|vn|es|pt|zh|ru|id|tr)$/i, "");
   return name || seg;
 }
@@ -122,15 +122,13 @@ function isJunkUrl(url: string): boolean {
   return JUNK_RE.test(url);
 }
 
-/* ─── Normalise API response → BannerItem[] ─── */
+/* ─── Normalise → BannerItem[] ─── */
 function normaliseItems(data: ApiResponse): BannerItem[] {
   const items: BannerItem[] = [];
 
-  /* New shape: groups with URL arrays */
   if ("groups" in data && data.groups) {
     const groups = data.groups as Record<string, string[]>;
     const processed = new Set<string>();
-
     for (const groupKey of [...GROUP_ORDER, ...Object.keys(groups)]) {
       if (processed.has(groupKey)) continue;
       processed.add(groupKey);
@@ -138,37 +136,25 @@ function normaliseItems(data: ApiResponse): BannerItem[] {
       urls.forEach((rawUrl, i) => {
         const url = cleanUrl(rawUrl);
         if (!url || isJunkUrl(url)) return;
-        items.push({
-          id:           `${groupKey}-${i}-${url.slice(-20)}`,
-          request_name: nameFromUrl(rawUrl),
-          url,
-          group:        groupKey,
-        });
+        items.push({ id: `${groupKey}-${i}-${url.slice(-20)}`, request_name: nameFromUrl(rawUrl), url, group: groupKey });
       });
     }
     return items;
   }
 
-  /* Legacy shape: categories with item objects */
   if ("categories" in data && data.categories) {
     const cats = (data as ApiResponseOld).categories;
     const legacy = [
-      ...(cats.loading?.items     ?? []),
+      ...(cats.loading?.items ?? []),
       ...(cats.backgrounds?.items ?? []),
-      ...(cats.booyahpass?.items  ?? []),
-      ...(cats.html?.items        ?? []),
-      ...(cats.others?.items      ?? []),
+      ...(cats.booyahpass?.items ?? []),
+      ...(cats.html?.items ?? []),
+      ...(cats.others?.items ?? []),
     ].sort((a, b) => b.slno - a.slno);
-
     legacy.forEach((item) => {
       const url = cleanUrl(item.url);
       if (!url || isJunkUrl(url)) return;
-      items.push({
-        id:           `legacy-${item.slno}-${item.request_name}`,
-        request_name: item.request_name,
-        url,
-        group:        "LEGACY",
-      });
+      items.push({ id: `legacy-${item.slno}-${item.request_name}`, request_name: item.request_name, url, group: "LEGACY" });
     });
     return items;
   }
@@ -178,7 +164,7 @@ function normaliseItems(data: ApiResponse): BannerItem[] {
 
 /* ─── Fetch ─── */
 function fetchBanners(region: string): Promise<ApiResponse> {
-  return fetch(`/api/banners?server=${region}`).then((r) => {
+  return fetch(`/api/banners?server=${apiCode(region)}`).then((r) => {
     if (!r.ok) throw new Error("fetch failed");
     return r.json();
   });
@@ -203,38 +189,30 @@ function FFLogo() {
   );
 }
 
-/* ─── Group badge colours ─── */
+/* ─── Group badge ─── */
 const GROUP_STYLES: Record<string, { bg: string; text: string; dot: string }> = {
-  EVENTS:      { bg: "bg-orange-500/15",  text: "text-orange-400",   dot: "bg-orange-400" },
-  LUCKROYALE:  { bg: "bg-yellow-500/15",  text: "text-yellow-400",   dot: "bg-yellow-400" },
-  BOOYAHPASS:  { bg: "bg-purple-500/15",  text: "text-purple-400",   dot: "bg-purple-400" },
-  TOPUP:       { bg: "bg-green-500/15",   text: "text-green-400",    dot: "bg-green-400"  },
-  PATCH:       { bg: "bg-blue-500/15",    text: "text-blue-400",     dot: "bg-blue-400"   },
-  MISSION:     { bg: "bg-cyan-500/15",    text: "text-cyan-400",     dot: "bg-cyan-400"   },
-  SOCIALS_HTML:{ bg: "bg-pink-500/15",    text: "text-pink-400",     dot: "bg-pink-400"   },
-  OTHERS:      { bg: "bg-white/8",        text: "text-white/40",     dot: "bg-white/30"   },
-  LEGACY:      { bg: "bg-white/8",        text: "text-white/40",     dot: "bg-white/30"   },
+  EVENTS:       { bg: "bg-orange-500/15", text: "text-orange-400",  dot: "bg-orange-400"  },
+  LUCKROYALE:   { bg: "bg-yellow-500/15", text: "text-yellow-400",  dot: "bg-yellow-400"  },
+  BOOYAHPASS:   { bg: "bg-purple-500/15", text: "text-purple-400",  dot: "bg-purple-400"  },
+  TOPUP:        { bg: "bg-green-500/15",  text: "text-green-400",   dot: "bg-green-400"   },
+  PATCH:        { bg: "bg-blue-500/15",   text: "text-blue-400",    dot: "bg-blue-400"    },
+  MISSION:      { bg: "bg-cyan-500/15",   text: "text-cyan-400",    dot: "bg-cyan-400"    },
+  SOCIALS_HTML: { bg: "bg-pink-500/15",   text: "text-pink-400",    dot: "bg-pink-400"    },
+  OTHERS:       { bg: "bg-white/8",       text: "text-white/40",    dot: "bg-white/30"    },
+  LEGACY:       { bg: "bg-white/8",       text: "text-white/40",    dot: "bg-white/30"    },
 };
-
 const GROUP_LABEL: Record<string, string> = {
-  EVENTS:       "Events",
-  LUCKROYALE:   "Lucky Royale",
-  BOOYAHPASS:   "Booyah Pass",
-  TOPUP:        "Top-Up",
-  PATCH:        "Patch Notes",
-  MISSION:      "Mission",
-  SOCIALS_HTML: "Socials / HTML",
-  OTHERS:       "Others",
-  LEGACY:       "Legacy",
+  EVENTS: "Events", LUCKROYALE: "Lucky Royale", BOOYAHPASS: "Booyah Pass",
+  TOPUP: "Top-Up", PATCH: "Patch Notes", MISSION: "Mission",
+  SOCIALS_HTML: "Socials / HTML", OTHERS: "Others", LEGACY: "Legacy",
 };
 
 function GroupBadge({ group }: { group: string }) {
-  const style = GROUP_STYLES[group] ?? GROUP_STYLES.OTHERS;
-  const label = GROUP_LABEL[group] ?? group;
+  const s = GROUP_STYLES[group] ?? GROUP_STYLES.OTHERS;
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide border border-white/5 ${style.bg} ${style.text}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${style.dot}`} />
-      {label}
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide border border-white/5 ${s.bg} ${s.text}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
+      {GROUP_LABEL[group] ?? group}
     </span>
   );
 }
@@ -242,11 +220,10 @@ function GroupBadge({ group }: { group: string }) {
 /* ─── Banner Card (memoised) ─── */
 const BannerCard = memo(function BannerCard({ item }: { item: BannerItem }) {
   const { toast } = useToast();
-  const [copied, setCopied]   = useState(false);
+  const [copied, setCopied]     = useState(false);
   const [imgError, setImgError] = useState(false);
 
-  const handleCopy = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(item.url).then(() => {
       setCopied(true);
       toast({ description: "URL copied!" });
@@ -254,17 +231,18 @@ const BannerCard = memo(function BannerCard({ item }: { item: BannerItem }) {
     });
   }, [item.url, toast]);
 
-  const handleOpen = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleOpen = useCallback(() => {
     window.open(item.url, "_blank", "noopener,noreferrer");
   }, [item.url]);
 
   const isImage = !/\.(html|mp4|mp3|ogg|ktx|pvr|astc|json)$/i.test(item.url);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-white/5 bg-white/[0.04] transition-colors duration-150 hover:border-orange-500/25 hover:bg-white/[0.06]">
+    <div className="overflow-hidden rounded-xl border border-white/5 bg-white/[0.04] hover:border-orange-500/25 hover:bg-white/[0.06]"
+         style={{ transition: "border-color 120ms, background-color 120ms" }}>
+
       {isImage && !imgError ? (
-        <div className="relative w-full aspect-[21/9] bg-black/40 overflow-hidden">
+        <div className="relative w-full bg-black/40 overflow-hidden" style={{ aspectRatio: "21/9" }}>
           <img
             src={item.url}
             alt={item.request_name}
@@ -273,46 +251,48 @@ const BannerCard = memo(function BannerCard({ item }: { item: BannerItem }) {
             loading="lazy"
             decoding="async"
           />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent pointer-events-none" />
-          {/* Group badge — overlaid bottom-left on image */}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-transparent pointer-events-none" />
           <div className="absolute bottom-2 left-2 pointer-events-none">
             <GroupBadge group={item.group} />
           </div>
           <button onClick={handleOpen}
-            className="absolute top-2 right-2 w-8 h-8 rounded-lg bg-black/55 hover:bg-orange-500 backdrop-blur-sm flex items-center justify-center transition-colors border border-white/10"
+            className="absolute top-2 right-2 w-7 h-7 rounded-lg bg-black/55 hover:bg-orange-500 flex items-center justify-center border border-white/10"
+            style={{ transition: "background-color 100ms" }}
             title="Open">
-            <ExternalLink size={13} className="text-white" />
+            <ExternalLink size={12} className="text-white" />
           </button>
         </div>
       ) : (
-        <div className="relative w-full aspect-[21/9] bg-black/25 flex items-center justify-center border-b border-white/5">
+        <div className="relative w-full bg-black/25 flex items-center justify-center border-b border-white/5"
+             style={{ aspectRatio: "21/9" }}>
           <div className="text-center text-white/20 px-4 select-none">
-            <ExternalLink size={22} className="mx-auto mb-1.5 opacity-40" />
+            <ExternalLink size={20} className="mx-auto mb-1.5 opacity-40" />
             <p className="text-xs break-all line-clamp-2 leading-relaxed opacity-70">
               {item.url.replace(/^https?:\/\//, "")}
             </p>
           </div>
-          {/* Group badge — overlaid bottom-left on placeholder */}
           <div className="absolute bottom-2 left-2">
             <GroupBadge group={item.group} />
           </div>
           <button onClick={handleOpen}
-            className="absolute top-2 right-2 w-8 h-8 rounded-lg bg-black/50 hover:bg-orange-500 flex items-center justify-center transition-colors border border-white/10">
-            <ExternalLink size={13} className="text-white" />
+            className="absolute top-2 right-2 w-7 h-7 rounded-lg bg-black/50 hover:bg-orange-500 flex items-center justify-center border border-white/10"
+            style={{ transition: "background-color 100ms" }}>
+            <ExternalLink size={12} className="text-white" />
           </button>
         </div>
       )}
 
-      <div className="px-3.5 py-2.5 flex items-center justify-between gap-3">
+      <div className="px-3 py-2.5 flex items-center justify-between gap-3">
         <p className="text-sm font-medium text-white/75 truncate" title={item.request_name}>
           {item.request_name}
         </p>
         <button onClick={handleCopy}
-          className={`flex-shrink-0 flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg font-medium transition-colors ${
+          className={`flex-shrink-0 flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg font-medium border ${
             copied
-              ? "bg-green-500/15 text-green-400 border border-green-500/25"
-              : "bg-white/5 hover:bg-orange-500 text-white/45 hover:text-white border border-white/8 hover:border-orange-500"
-          }`}>
+              ? "bg-green-500/15 text-green-400 border-green-500/25"
+              : "bg-white/5 hover:bg-orange-500 text-white/45 hover:text-white border-white/8 hover:border-orange-500"
+          }`}
+          style={{ transition: "background-color 100ms, color 100ms, border-color 100ms" }}>
           {copied ? <><Check size={11} />Copied</> : <><Copy size={11} />Copy URL</>}
         </button>
       </div>
@@ -320,7 +300,7 @@ const BannerCard = memo(function BannerCard({ item }: { item: BannerItem }) {
   );
 });
 
-/* ─── Debounce hook ─── */
+/* ─── Hooks ─── */
 function useDebounce<T>(value: T, ms: number): T {
   const [d, setD] = useState(value);
   useEffect(() => {
@@ -330,7 +310,7 @@ function useDebounce<T>(value: T, ms: number): T {
   return d;
 }
 
-/* ─── Status helper ─── */
+/* ─── Small helpers ─── */
 function StatusView({ icon, text }: { icon: React.ReactNode; text: string }) {
   return (
     <div className="flex flex-col items-center justify-center py-24 gap-3">
@@ -340,7 +320,6 @@ function StatusView({ icon, text }: { icon: React.ReactNode; text: string }) {
   );
 }
 
-/* ─── Store Coming Soon ─── */
 function StoreComing() {
   return (
     <div className="flex flex-col items-center justify-center py-28 gap-5">
@@ -375,13 +354,22 @@ export default function BannersPage() {
   const [regionOpen, setRegionOpen]     = useState(false);
   const [searchRaw, setSearchRaw]       = useState("");
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [, startTransition]             = useTransition();
 
-  const search = useDebounce(searchRaw, 250);
+  const search         = useDebounce(searchRaw, 250);
   const selectedRegion = REGIONS.find((r) => r.code === region) ?? REGIONS[0];
   const quickFilters   = REGION_FILTERS[region] ?? [];
 
-  useEffect(() => { setActiveFilter(null); setSearchRaw(""); }, [region]);
+  /* Reset pagination + filters on region change */
+  useEffect(() => {
+    setActiveFilter(null);
+    setSearchRaw("");
+    setVisibleCount(PAGE_SIZE);
+  }, [region]);
+
+  /* Reset pagination on filter/search change */
+  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [search, activeFilter]);
 
   const { data, isLoading, isError } = useQuery({
     queryKey:  ["banners-v2", region],
@@ -398,28 +386,34 @@ export default function BannersPage() {
     let items = allItems;
     if (activeFilter) {
       const af = activeFilter.toLowerCase();
-      items = items.filter(
-        (i) => i.request_name.toLowerCase().includes(af) || i.url.toLowerCase().includes(af)
-      );
+      items = items.filter((i) => i.request_name.toLowerCase().includes(af) || i.url.toLowerCase().includes(af));
     }
     if (search.trim()) {
       const q = search.toLowerCase();
-      items = items.filter(
-        (i) => i.request_name.toLowerCase().includes(q) || i.url.toLowerCase().includes(q)
-      );
+      items = items.filter((i) => i.request_name.toLowerCase().includes(q) || i.url.toLowerCase().includes(q));
     }
     return items;
   }, [allItems, search, activeFilter]);
 
+  /* Only render the current page slice */
+  const visibleItems = useMemo(
+    () => filteredItems.slice(0, visibleCount),
+    [filteredItems, visibleCount]
+  );
+  const hasMore = visibleCount < filteredItems.length;
+
   const handleSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     startTransition(() => setSearchRaw(e.target.value));
   }, []);
-  const handleClearSearch  = useCallback(() => startTransition(() => setSearchRaw("")), []);
-  const handleFilterChip   = useCallback((chip: string) => {
+  const handleClearSearch = useCallback(() => startTransition(() => setSearchRaw("")), []);
+  const handleFilterChip  = useCallback((chip: string) => {
     startTransition(() => {
       setActiveFilter((p) => (p === chip ? null : chip));
       setSearchRaw("");
     });
+  }, []);
+  const handleLoadMore = useCallback(() => {
+    startTransition(() => setVisibleCount((n) => n + PAGE_SIZE));
   }, []);
 
   return (
@@ -441,25 +435,28 @@ export default function BannersPage() {
 
             {/* Region dropdown */}
             <div className="relative">
-              <button
-                onClick={() => setRegionOpen((p) => !p)}
-                className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium bg-white/5 hover:bg-white/8 text-white/70 hover:text-white border border-white/8 hover:border-orange-500/40 transition-colors">
+              <button onClick={() => setRegionOpen((p) => !p)}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium bg-white/5 hover:bg-white/8 text-white/70 hover:text-white border border-white/8 hover:border-orange-500/40"
+                style={{ transition: "background-color 100ms, border-color 100ms, color 100ms" }}>
                 <span className="text-xs font-mono text-orange-400 font-bold">{selectedRegion.code}</span>
                 <span className="text-white/30">|</span>
                 <span className="text-xs">{selectedRegion.name}</span>
-                <ChevronDown size={12} className={`text-white/35 transition-transform ${regionOpen ? "rotate-180" : ""}`} />
+                <ChevronDown size={12} className={`text-white/35 ${regionOpen ? "rotate-180" : ""}`}
+                  style={{ transition: "transform 150ms" }} />
               </button>
+
               {regionOpen && (
                 <div className="absolute top-full mt-2 right-0 w-52 bg-[#161920] border border-white/8 rounded-xl shadow-2xl z-30 overflow-hidden">
                   <div className="py-1.5 max-h-72 overflow-y-auto">
                     {REGIONS.map((r) => (
                       <button key={r.code}
                         onClick={() => { setRegion(r.code); setRegionOpen(false); }}
-                        className={`w-full flex items-center justify-between px-3.5 py-2 text-sm transition-colors ${
+                        className={`w-full flex items-center justify-between px-3.5 py-2 text-sm ${
                           r.code === region
                             ? "bg-orange-500/15 text-orange-400 font-semibold"
                             : "text-white/55 hover:bg-white/5 hover:text-white"
-                        }`}>
+                        }`}
+                        style={{ transition: "background-color 80ms" }}>
                         <span>{r.name}</span>
                         <span className={`text-xs font-mono ${r.code === region ? "text-orange-400" : "text-white/25"}`}>{r.code}</span>
                       </button>
@@ -474,18 +471,19 @@ export default function BannersPage() {
           <div className="flex gap-2 mb-3">
             {(["banners", "store"] as Tab[]).map((t) => (
               <button key={t} onClick={() => setActiveTab(t)}
-                className={`flex items-center gap-1.5 px-5 py-2 rounded-xl text-sm font-semibold capitalize transition-colors ${
+                className={`flex items-center gap-1.5 px-5 py-2 rounded-xl text-sm font-semibold capitalize ${
                   activeTab === t
                     ? "bg-orange-500 text-white"
                     : "bg-white/5 text-white/45 hover:bg-white/8 hover:text-white border border-white/6"
-                }`}>
+                }`}
+                style={{ transition: "background-color 100ms, color 100ms" }}>
                 {t === "banners" ? <LayoutGrid size={13} /> : <ShoppingBag size={13} />}
                 {t.charAt(0).toUpperCase() + t.slice(1)}
               </button>
             ))}
           </div>
 
-          {/* Search + filter chips */}
+          {/* Search + chips */}
           {activeTab === "banners" && (
             <>
               <div className="relative mb-2">
@@ -495,11 +493,13 @@ export default function BannersPage() {
                   value={searchRaw}
                   onChange={handleSearchChange}
                   placeholder="Search banners…"
-                  className="w-full bg-white/[0.05] border border-white/8 focus:border-orange-500/50 rounded-xl pl-8 pr-8 py-2.5 text-sm text-white placeholder:text-white/25 outline-none transition-colors"
+                  className="w-full bg-white/[0.05] border border-white/8 focus:border-orange-500/50 rounded-xl pl-8 pr-8 py-2.5 text-sm text-white placeholder:text-white/25 outline-none"
+                  style={{ transition: "border-color 100ms" }}
                 />
                 {searchRaw && (
                   <button onClick={handleClearSearch}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60 transition-colors p-0.5">
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60 p-0.5"
+                    style={{ transition: "color 80ms" }}>
                     <X size={13} />
                   </button>
                 )}
@@ -509,17 +509,19 @@ export default function BannersPage() {
                 <div className="flex flex-wrap gap-1.5 mb-1">
                   {quickFilters.map((chip) => (
                     <button key={chip} onClick={() => handleFilterChip(chip)}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors border ${
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium border ${
                         activeFilter === chip
                           ? "bg-orange-500 text-white border-orange-500"
                           : "bg-white/5 text-white/45 border-white/8 hover:bg-white/10 hover:text-white/80"
-                      }`}>
+                      }`}
+                      style={{ transition: "background-color 80ms, color 80ms" }}>
                       {chip}
                     </button>
                   ))}
                   {activeFilter && (
                     <button onClick={() => setActiveFilter(null)}
-                      className="px-2 py-1 rounded-lg text-xs text-white/30 hover:text-white/60 transition-colors flex items-center gap-1">
+                      className="px-2 py-1 rounded-lg text-xs text-white/30 hover:text-white/60 flex items-center gap-1"
+                      style={{ transition: "color 80ms" }}>
                       <X size={10} /> Clear
                     </button>
                   )}
@@ -556,12 +558,21 @@ export default function BannersPage() {
           ) : (
             <div className="space-y-3">
               <p className="text-xs text-white/20 font-medium">
-                {filteredItems.length} banner{filteredItems.length !== 1 ? "s" : ""}
+                Showing {visibleItems.length} of {filteredItems.length} banner{filteredItems.length !== 1 ? "s" : ""}
                 {(activeFilter || search) ? ` — "${activeFilter ?? search}"` : ""}
               </p>
-              {filteredItems.map((item) => (
+
+              {visibleItems.map((item) => (
                 <BannerCard key={item.id} item={item} />
               ))}
+
+              {hasMore && (
+                <button onClick={handleLoadMore}
+                  className="w-full py-3 rounded-xl text-sm font-semibold text-white/50 hover:text-white bg-white/[0.03] hover:bg-white/[0.07] border border-white/6 hover:border-orange-500/30"
+                  style={{ transition: "background-color 100ms, color 100ms, border-color 100ms" }}>
+                  Load more — {filteredItems.length - visibleCount} remaining
+                </button>
+              )}
             </div>
           )}
         </main>
