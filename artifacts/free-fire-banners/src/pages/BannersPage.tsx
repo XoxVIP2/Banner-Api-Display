@@ -451,16 +451,18 @@ export default function BannersPage() {
 
   /* Queries */
   const bannersQuery = useQuery({
-    queryKey: ["banners-v2", region],
-    queryFn:  () => fetchBanners(region),
-    staleTime: 5 * 60 * 1000,
+    queryKey:       ["banners-v2", region],
+    queryFn:        () => fetchBanners(region),
+    staleTime:      5 * 60 * 1000,
+    refetchInterval: 5 * 60 * 1000,
   });
 
   const storeQuery = useQuery({
-    queryKey:  ["store-v1", region],
-    queryFn:   () => fetchStore(region),
-    staleTime: 5 * 60 * 1000,
-    enabled:   activeTab === "store",
+    queryKey:        ["store-v1", region],
+    queryFn:         () => fetchStore(region),
+    staleTime:       5 * 60 * 1000,
+    refetchInterval: 5 * 60 * 1000,
+    enabled:         activeTab === "store",
   });
 
   const allBanners = useMemo(() => bannersQuery.data ? normaliseItems(bannersQuery.data) : [], [bannersQuery.data]);
